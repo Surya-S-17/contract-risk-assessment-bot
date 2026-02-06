@@ -10,11 +10,26 @@ import re
 st.set_page_config(page_title="LLM Contract Risk Analyzer", layout="centered")
 st.title("📄 LLM-Powered Contract Risk Analyzer")
 
-# Load Gemini API key
 genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
 model = genai.GenerativeModel("gemini-pro")
 
-# ---------------- HELPERS ---------------- #
+CLAUSES = [
+    "Termination",
+    "Liability",
+    "Indemnity",
+    "Jurisdiction",
+    "Confidentiality",
+    "Payment & Fees",
+    "Risk Allocation"
+]
+
+RISK_ORDER = {"Low": 1, "Medium": 2, "High": 3}
+
+# ---------------- UTILS ---------------- #
+
+def clean_json(text):
+    text = re.sub(r"```json|```", "", text)
+    return text.strip()
 
 def extract_text(file):
     if file.name.endswith(".pdf"):
@@ -34,8 +49,8 @@ def extract_text(file):
 
     return ""
 
-def chunk_text(text, max_chars=3500):
-    paragraphs = [p.strip() for p in text.split("\n") if len(p.strip()) > 200]
+def chunk_text(text, max_chars=3000):
+    paragraphs = [p.strip() for p in text.split("\n") if len(p.strip()) > 150]
     chunks, current = [], ""
 
     for p in paragraphs:
@@ -50,97 +65,139 @@ def chunk_text(text, max_chars=3500):
 
     return chunks
 
-def analyze_chunk(chunk):
+# ---------------- PASS 1: CLAUSE PRESENCE ---------------- #
+
+def detect_clauses(chunk):
+    prompt = f"""
+You are a legal document classifier.
+
+Task:
+Determine ONLY whether each clause type is PRESENT in the text.
+Do NOT assess risk.
+
+Rules:
+- If obligations, responsibilities, rights, costs, or restrictions exist → PRESENT = true
+- Be conservative: when in doubt, mark true
+
+Return ONLY valid JSON:
+
+{{
+  "Termination": true/false,
+  "Liability": true/false,
+  "Indemnity": true/false,
+  "Jurisdiction": true/false,
+  "Confidentiality": true/false,
+  "Payment & Fees": true/false,
+  "Risk Allocation": true/false
+}}
+
+Text:
+\"\"\"{chunk}\"\"\"
+"""
+    resp = model.generate_content(prompt)
+    return json.loads(clean_json(resp.text))
+
+# ---------------- PASS 2: RISK ASSESSMENT ---------------- #
+
+def assess_risk(clause, chunk):
     prompt = f"""
 You are a legal risk analyst.
 
-Analyze the contract section below and assess legal risks.
+Clause: {clause}
 
-Clauses to analyze:
-- Termination
-- Liability
-- Indemnity
-- Jurisdiction
-- Confidentiality
-- Payment & Fees
-- Risk Allocation
+Risk rubric:
 
-Risk rules:
 HIGH:
 - Unlimited or broad liability
 - Sole responsibility
-- Broad indemnity
+- Broad indemnification
 - Unilateral termination
+- Costs borne without cap
 
 MEDIUM:
-- Liability exists but procedural or shared
-- Termination with notice
-- Payment obligations with conditions
+- Liability or termination with procedures
+- Shared responsibility
+- Conditional payments
 
 LOW:
-- Explicit limitations
+- Explicit caps
 - Balanced obligations
-- Clear jurisdiction
+- Mutual protections
 
-Return ONLY valid JSON in this exact format:
+Rules:
+- Be conservative
+- When unsure → choose MEDIUM
+
+Return ONLY valid JSON:
 
 {{
-  "Termination": {{ "present": true/false, "risk": "Low/Medium/High", "reason": "..." }},
-  "Liability": {{ "present": true/false, "risk": "Low/Medium/High", "reason": "..." }},
-  "Indemnity": {{ "present": true/false, "risk": "Low/Medium/High", "reason": "..." }},
-  "Jurisdiction": {{ "present": true/false, "risk": "Low/Medium/High", "reason": "..." }},
-  "Confidentiality": {{ "present": true/false, "risk": "Low/Medium/High", "reason": "..." }},
-  "Payment & Fees": {{ "present": true/false, "risk": "Low/Medium/High", "reason": "..." }},
-  "Risk Allocation": {{ "present": true/false, "risk": "Low/Medium/High", "reason": "..." }}
+  "risk": "Low/Medium/High",
+  "reason": "Short justification"
 }}
 
-Contract Section:
+Text:
 \"\"\"{chunk}\"\"\"
 """
+    resp = model.generate_content(prompt)
+    return json.loads(clean_json(resp.text))
 
-    response = model.generate_content(prompt)
-    clean = re.sub(r"```json|```", "", response.text).strip()
-    return json.loads(clean)
+# ---------------- AGGREGATION ---------------- #
 
-def merge_results(all_results):
-    final = {}
+def analyze_document(text):
+    chunks = chunk_text(text)
+    clause_present = {c: False for c in CLAUSES}
+    clause_risk = {}
 
-    for res in all_results:
-        for clause, data in res.items():
-            if not data["present"]:
-                continue
+    for chunk in chunks:
+        presence = detect_clauses(chunk)
 
-            if clause not in final:
-                final[clause] = data
-            else:
-                # escalate risk if needed
-                levels = ["Low", "Medium", "High"]
-                if levels.index(data["risk"]) > levels.index(final[clause]["risk"]):
-                    final[clause] = data
+        for clause, is_present in presence.items():
+            if is_present:
+                clause_present[clause] = True
+                risk_data = assess_risk(clause, chunk)
 
-    return final
+                if clause not in clause_risk:
+                    clause_risk[clause] = risk_data
+                else:
+                    if RISK_ORDER[risk_data["risk"]] > RISK_ORDER[clause_risk[clause]["risk"]]:
+                        clause_risk[clause] = risk_data
+
+    # ---------------- SANITY GUARDRAILS ---------------- #
+
+    lower_text = text.lower()
+
+    if "indemnify" in lower_text or "hold harmless" in lower_text:
+        clause_risk["Indemnity"] = {
+            "risk": "High",
+            "reason": "Indemnification obligations detected"
+        }
+
+    if "liability" in lower_text and "limit" not in lower_text:
+        clause_risk["Liability"] = {
+            "risk": "High",
+            "reason": "Liability obligations without explicit limitation"
+        }
+
+    return clause_risk
 
 # ---------------- UI ---------------- #
 
-uploaded_file = st.file_uploader("Upload Contract (PDF / DOCX / TXT)", type=["pdf", "docx", "txt"])
+uploaded_file = st.file_uploader(
+    "Upload Contract (PDF / DOCX / TXT)",
+    type=["pdf", "docx", "txt"]
+)
 
 if uploaded_file:
-    with st.spinner("Analyzing contract with Gemini Pro..."):
+    with st.spinner("Analyzing contract using Gemini Pro..."):
         text = extract_text(uploaded_file)
-        chunks = chunk_text(text)
-
-        chunk_results = []
-        for c in chunks[:5]:  # limit for safety
-            chunk_results.append(analyze_chunk(c))
-
-        final_results = merge_results(chunk_results)
+        results = analyze_document(text)
 
     st.success("Analysis Complete")
 
-    if final_results:
-        for clause, info in final_results.items():
+    if results:
+        for clause, info in results.items():
             st.subheader(clause)
             st.write("🔴 Risk Level:", info["risk"])
             st.write("📝 Reason:", info["reason"])
     else:
-        st.info("No significant risks detected.")
+        st.info("No significant legal risks detected.")
