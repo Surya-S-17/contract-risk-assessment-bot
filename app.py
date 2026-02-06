@@ -5,15 +5,11 @@ import requests
 import json
 import re
 
-st.set_page_config(page_title="LLM Contract Risk Analyzer", layout="centered")
-st.title("📄 LLM-Powered Contract Risk Analyzer")
+st.set_page_config(page_title="Contract Risk Analyzer", layout="centered")
+st.title("📄 Contract Risk Analyzer (LLM-powered)")
 
-GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
-GEMINI_URL = (
-    "https://generativelanguage.googleapis.com/v1/models/"
-    "gemini-1.0-pro:generateContent?key=" + GEMINI_API_KEY
-)
-
+OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"]
+OPENAI_URL = "https://api.openai.com/v1/chat/completions"
 
 CLAUSES = [
     "Termination",
@@ -51,37 +47,43 @@ def extract_text(file):
 def chunk_text(text, size=3000):
     return [text[i:i+size] for i in range(0, len(text), size)]
 
-def call_gemini(prompt):
-    payload = {
-        "contents": [
-            {"parts": [{"text": prompt}]}
-        ]
+def extract_json(text):
+    m = re.search(r"\{.*\}", text, re.DOTALL)
+    if not m:
+        raise ValueError("LLM did not return JSON")
+    return json.loads(m.group())
+
+def call_openai(prompt):
+    headers = {
+        "Authorization": f"Bearer {OPENAI_API_KEY}",
+        "Content-Type": "application/json"
     }
-    headers = {"Content-Type": "application/json"}
-    resp = requests.post(GEMINI_URL, headers=headers, json=payload, timeout=60)
+
+    payload = {
+        "model": "gpt-4o-mini",
+        "messages": [
+            {"role": "system", "content": "You are a legal risk analyst."},
+            {"role": "user", "content": prompt}
+        ],
+        "temperature": 0.1
+    }
+
+    resp = requests.post(OPENAI_URL, headers=headers, json=payload, timeout=60)
 
     if resp.status_code != 200:
         raise RuntimeError(resp.text)
 
-    text = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
-    return extract_json(text)
-
-def extract_json(text):
-    match = re.search(r"\{.*\}", text, re.DOTALL)
-    if not match:
-        raise ValueError("LLM did not return JSON")
-    return json.loads(match.group())
+    content = resp.json()["choices"][0]["message"]["content"]
+    return extract_json(content)
 
 # ---------------- LLM ANALYSIS ---------------- #
 
 def analyze_chunk(chunk):
     prompt = f"""
-You are a legal risk analyst.
-
 Analyze the contract text below.
 
 For each clause:
-- Determine if present
+- Decide if present
 - Assign risk: Low / Medium / High
 - Give short reason
 
@@ -103,7 +105,7 @@ Return ONLY valid JSON:
 Text:
 \"\"\"{chunk}\"\"\"
 """
-    return call_gemini(prompt)
+    return call_openai(prompt)
 
 # ---------------- MAIN ---------------- #
 
@@ -118,7 +120,7 @@ if uploaded:
     if len(text.strip()) < 200:
         st.error("❌ No readable text found (likely scanned PDF).")
     else:
-        with st.spinner("Analyzing contract using Gemini 1.5 Pro (REST)..."):
+        with st.spinner("Analyzing contract..."):
             chunks = chunk_text(text)
             final = {}
 
@@ -142,4 +144,3 @@ if uploaded:
             st.subheader(clause)
             st.write("🔴 Risk Level:", info["risk"])
             st.write("📝 Reason:", info["reason"])
-
