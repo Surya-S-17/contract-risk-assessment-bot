@@ -11,8 +11,9 @@ st.title("📄 LLM-Powered Contract Risk Analyzer")
 GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
 GEMINI_URL = (
     "https://generativelanguage.googleapis.com/v1/models/"
-    "gemini-1.5-pro:generateContent?key=" + GEMINI_API_KEY
+    "gemini-1.0-pro:generateContent?key=" + GEMINI_API_KEY
 )
+
 
 CLAUSES = [
     "Termination",
@@ -141,3 +142,4 @@ if uploaded:
             st.subheader(clause)
             st.write("🔴 Risk Level:", info["risk"])
             st.write("📝 Reason:", info["reason"])
+
