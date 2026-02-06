@@ -12,7 +12,8 @@ st.title("📄 LLM-Powered Contract Risk Analyzer")
 
 # Configure Gemini (UPDATED MODEL)
 genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
-model = genai.GenerativeModel("models/gemini-1.5-pro")
+model = genai.GenerativeModel("models/gemini-1.5-flash")
+
 
 CLAUSES = [
     "Termination",
@@ -210,3 +211,4 @@ if uploaded_file:
             st.subheader(clause)
             st.write("🔴 Risk Level:", info["risk"])
             st.write("📝 Reason:", info["reason"])
+
