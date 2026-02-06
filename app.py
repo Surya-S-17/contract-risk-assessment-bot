@@ -48,7 +48,7 @@ def analyze_contract(text):
 
         for i, s in enumerate(sent_emb):
             score = util.cos_sim(s, key_emb).max()
-            if score > 0.6:
+            if score > 0.45:
                 matches.append(sentences[i])
 
         if matches:
@@ -96,4 +96,5 @@ if file:
             st.write("📝 Reason:", item["Reason"])
     else:
         st.info("No major risk clauses detected.")
+
 
