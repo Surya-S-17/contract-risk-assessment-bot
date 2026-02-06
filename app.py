@@ -1,10 +1,13 @@
 import streamlit as st
 import pdfplumber
 from docx import Document
-import nltk
 from sentence_transformers import SentenceTransformer, util
+import re
 
-nltk.download("punkt")
+def split_sentences(text):
+    return re.split(r'(?<=[.!?])\s+', text)
+
+
 
 model = SentenceTransformer("all-MiniLM-L6-v2")
 
@@ -34,7 +37,7 @@ def extract_text(file):
     return ""
 
 def analyze_contract(text):
-    sentences = nltk.sent_tokenize(text)
+    sentences = split_sentences(text)
     sent_emb = model.encode(sentences, convert_to_tensor=True)
 
     results = []
@@ -93,3 +96,4 @@ if file:
             st.write("📝 Reason:", item["Reason"])
     else:
         st.info("No major risk clauses detected.")
+
