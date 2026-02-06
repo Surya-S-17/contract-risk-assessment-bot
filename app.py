@@ -1,20 +1,18 @@
 import streamlit as st
 import pdfplumber
 from docx import Document
-import google.generativeai as genai
+import requests
 import json
 import re
-
-# ================== CONFIG ================== #
 
 st.set_page_config(page_title="LLM Contract Risk Analyzer", layout="centered")
 st.title("📄 LLM-Powered Contract Risk Analyzer")
 
-# Configure Gemini (UPDATED MODEL)
-genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
-model = genai.GenerativeModel("gemini-1.5-pro")
-
-
+GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
+GEMINI_URL = (
+    "https://generativelanguage.googleapis.com/v1/models/"
+    "gemini-1.5-pro:generateContent?key=" + GEMINI_API_KEY
+)
 
 CLAUSES = [
     "Termination",
@@ -28,16 +26,16 @@ CLAUSES = [
 
 RISK_ORDER = {"Low": 1, "Medium": 2, "High": 3}
 
-# ================== UTILS ================== #
+# ---------------- UTILS ---------------- #
 
 def extract_text(file):
     if file.name.endswith(".pdf"):
         text = ""
         with pdfplumber.open(file) as pdf:
             for page in pdf.pages:
-                page_text = page.extract_text()
-                if page_text:
-                    text += page_text + "\n"
+                t = page.extract_text()
+                if t:
+                    text += t + "\n"
         return text
 
     elif file.name.endswith(".docx"):
@@ -49,168 +47,97 @@ def extract_text(file):
 
     return ""
 
-def chunk_text(text, max_chars=3000):
-    # Guaranteed chunking (never returns empty if text exists)
-    text = re.sub(r"\n+", "\n", text)
-    return [text[i:i+max_chars] for i in range(0, len(text), max_chars)]
+def chunk_text(text, size=3000):
+    return [text[i:i+size] for i in range(0, len(text), size)]
+
+def call_gemini(prompt):
+    payload = {
+        "contents": [
+            {"parts": [{"text": prompt}]}
+        ]
+    }
+    headers = {"Content-Type": "application/json"}
+    resp = requests.post(GEMINI_URL, headers=headers, json=payload, timeout=60)
+
+    if resp.status_code != 200:
+        raise RuntimeError(resp.text)
+
+    text = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
+    return extract_json(text)
 
 def extract_json(text):
     match = re.search(r"\{.*\}", text, re.DOTALL)
     if not match:
-        raise ValueError("No JSON found in Gemini response")
+        raise ValueError("LLM did not return JSON")
     return json.loads(match.group())
 
-# ================== PASS 1: CLAUSE PRESENCE ================== #
+# ---------------- LLM ANALYSIS ---------------- #
 
-def detect_clauses(chunk):
-    prompt = f"""
-You are a legal document classifier.
-
-Task:
-ONLY determine whether each clause type is PRESENT.
-DO NOT assess risk.
-
-Rules:
-- If obligations, responsibilities, rights, costs, or restrictions exist → PRESENT = true
-- Be conservative: if unsure, mark true
-
-Return ONLY valid JSON:
-
-{{
-  "Termination": true/false,
-  "Liability": true/false,
-  "Indemnity": true/false,
-  "Jurisdiction": true/false,
-  "Confidentiality": true/false,
-  "Payment & Fees": true/false,
-  "Risk Allocation": true/false
-}}
-
-Text:
-\"\"\"{chunk}\"\"\"
-"""
-    response = model.generate_content(prompt)
-    return extract_json(response.text)
-
-# ================== PASS 2: RISK ASSESSMENT ================== #
-
-def assess_risk(clause, chunk):
+def analyze_chunk(chunk):
     prompt = f"""
 You are a legal risk analyst.
 
-Clause: {clause}
+Analyze the contract text below.
 
-Risk rubric:
+For each clause:
+- Determine if present
+- Assign risk: Low / Medium / High
+- Give short reason
 
-HIGH:
-- Unlimited or broad liability
-- Sole responsibility
-- Broad indemnification
-- Unilateral termination
-- Costs borne without cap
-
-MEDIUM:
-- Termination with procedure or notice
-- Shared responsibility
-- Conditional or milestone-based payments
-
-LOW:
-- Explicit liability caps
-- Balanced obligations
-- Mutual protections
-
-Rules:
-- Be conservative
-- If unsure → choose MEDIUM
+Clauses:
+Termination, Liability, Indemnity, Jurisdiction, Confidentiality, Payment & Fees, Risk Allocation
 
 Return ONLY valid JSON:
 
 {{
-  "risk": "Low/Medium/High",
-  "reason": "Short justification"
+  "Termination": {{ "present": true/false, "risk": "Low/Medium/High", "reason": "..." }},
+  "Liability": {{ "present": true/false, "risk": "Low/Medium/High", "reason": "..." }},
+  "Indemnity": {{ "present": true/false, "risk": "Low/Medium/High", "reason": "..." }},
+  "Jurisdiction": {{ "present": true/false, "risk": "Low/Medium/High", "reason": "..." }},
+  "Confidentiality": {{ "present": true/false, "risk": "Low/Medium/High", "reason": "..." }},
+  "Payment & Fees": {{ "present": true/false, "risk": "Low/Medium/High", "reason": "..." }},
+  "Risk Allocation": {{ "present": true/false, "risk": "Low/Medium/High", "reason": "..." }}
 }}
 
 Text:
 \"\"\"{chunk}\"\"\"
 """
-    response = model.generate_content(prompt)
-    return extract_json(response.text)
+    return call_gemini(prompt)
 
-# ================== MAIN ANALYSIS ================== #
+# ---------------- MAIN ---------------- #
 
-def analyze_document(text):
-    chunks = chunk_text(text)
-    st.write("DEBUG: Total chunks =", len(chunks))
-
-    clause_risk = {}
-
-    for idx, chunk in enumerate(chunks):
-        st.write(f"DEBUG: Analyzing chunk {idx+1}")
-
-        try:
-            presence = detect_clauses(chunk)
-            st.write("DEBUG: Clause presence =", presence)
-
-            for clause, is_present in presence.items():
-                if is_present:
-                    risk_data = assess_risk(clause, chunk)
-
-                    if clause not in clause_risk:
-                        clause_risk[clause] = risk_data
-                    else:
-                        if RISK_ORDER[risk_data["risk"]] > RISK_ORDER[clause_risk[clause]["risk"]]:
-                            clause_risk[clause] = risk_data
-
-        except Exception as e:
-            st.error(f"LLM error on chunk {idx+1}: {e}")
-
-    # ================== LEGAL GUARDRAILS ================== #
-
-    lower_text = text.lower()
-
-    if "indemnify" in lower_text or "hold harmless" in lower_text:
-        clause_risk["Indemnity"] = {
-            "risk": "High",
-            "reason": "Indemnification or hold-harmless obligations detected"
-        }
-
-    if "liability" in lower_text and "limit" not in lower_text:
-        clause_risk["Liability"] = {
-            "risk": "High",
-            "reason": "Liability obligations detected without explicit limitation"
-        }
-
-    if not clause_risk:
-        clause_risk["General Contract Risk"] = {
-            "risk": "Medium",
-            "reason": "Complex legal contract detected; manual legal review recommended"
-        }
-
-    return clause_risk
-
-# ================== UI ================== #
-
-uploaded_file = st.file_uploader(
+uploaded = st.file_uploader(
     "Upload Contract (PDF / DOCX / TXT)",
     type=["pdf", "docx", "txt"]
 )
 
-if uploaded_file:
-    text = extract_text(uploaded_file)
+if uploaded:
+    text = extract_text(uploaded)
 
-    # IMPORTANT: handle scanned PDFs safely
     if len(text.strip()) < 200:
-        st.error("❌ No readable text found in this file.")
-        st.info("This appears to be a scanned PDF. Please upload a text-based PDF or DOCX.")
+        st.error("❌ No readable text found (likely scanned PDF).")
     else:
-        with st.spinner("Analyzing contract using Gemini 1.5 Pro..."):
-            results = analyze_document(text)
+        with st.spinner("Analyzing contract using Gemini 1.5 Pro (REST)..."):
+            chunks = chunk_text(text)
+            final = {}
+
+            for c in chunks:
+                data = analyze_chunk(c)
+                for k, v in data.items():
+                    if not v["present"]:
+                        continue
+                    if k not in final or RISK_ORDER[v["risk"]] > RISK_ORDER[final[k]["risk"]]:
+                        final[k] = v
+
+        if not final:
+            final["General Contract Risk"] = {
+                "risk": "Medium",
+                "reason": "Complex legal contract detected; manual review recommended"
+            }
 
         st.success("Analysis Complete")
 
-        for clause, info in results.items():
+        for clause, info in final.items():
             st.subheader(clause)
             st.write("🔴 Risk Level:", info["risk"])
             st.write("📝 Reason:", info["reason"])
-
-
