@@ -4,7 +4,7 @@ from docx import Document
 import re
 
 st.set_page_config(page_title="Contract Risk Analyzer", layout="centered")
-st.title("📄 Contract Risk Analyzer (Rule-Based)")
+st.title("📄 Contract Risk Analyzer")
 
 # ---------------- UTILS ---------------- #
 
@@ -27,7 +27,7 @@ def extract_text(file):
 
     return ""
 
-# ---------------- CLAUSE DETECTION ---------------- #
+# ---------------- RISK ENGINE ---------------- #
 
 def detect_risks(text):
     results = {}
@@ -61,7 +61,7 @@ def detect_risks(text):
     if re.search(r"jurisdiction|governing law|laws of", text):
         risk = "Low"
         reason = "Jurisdiction clause detected"
-        if re.search(r"foreign|outside|exclusive jurisdiction", text):
+        if re.search(r"foreign|exclusive jurisdiction", text):
             risk = "Medium"
             reason = "Restrictive or foreign jurisdiction detected"
         results["Jurisdiction"] = {"risk": risk, "reason": reason}
@@ -82,7 +82,6 @@ def detect_risks(text):
             "reason": "Payment and fee-related terms detected"
         }
 
-    # OVERALL FALLBACK
     if not results:
         results["General Contract Risk"] = {
             "risk": "Medium",
@@ -90,6 +89,22 @@ def detect_risks(text):
         }
 
     return results
+
+# ---------------- UI HELPERS ---------------- #
+
+def risk_badge(risk):
+    if risk == "High":
+        return "🔴 High Risk"
+    if risk == "Medium":
+        return "🟠 Medium Risk"
+    return "🟢 Low Risk"
+
+def overall_risk(risks):
+    if any(v["risk"] == "High" for v in risks.values()):
+        return "🔴 HIGH"
+    if any(v["risk"] == "Medium" for v in risks.values()):
+        return "🟠 MEDIUM"
+    return "🟢 LOW"
 
 # ---------------- UI ---------------- #
 
@@ -107,9 +122,16 @@ if uploaded:
         with st.spinner("Analyzing contract..."):
             risks = detect_risks(text)
 
-        st.success("Analysis Complete")
+        # 🔥 OVERALL SUMMARY
+        st.markdown("## 📊 Overall Contract Risk")
+        st.markdown(f"### {overall_risk(risks)}")
+
+        st.divider()
+
+        # 📌 CLAUSE DETAILS
+        st.markdown("## 📑 Clause-wise Risk Analysis")
 
         for clause, info in risks.items():
-            st.subheader(clause)
-            st.write("🔴 Risk Level:", info["risk"])
-            st.write("📝 Reason:", info["reason"])
+            with st.expander(f"{clause} — {risk_badge(info['risk'])}", expanded=False):
+                st.write("**Risk Level:**", info["risk"])
+                st.write("**Reason:**", info["reason"])
